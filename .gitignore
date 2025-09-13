@@ -1,9 +1,5 @@
-.DS_Store
-node_modules
-.next
+﻿# secrets
 .env
-.env.local
-.vercel
-coverage
-playwright-report
-test-results
+.env.*
+!*.example
+*.pem
