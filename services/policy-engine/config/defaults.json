@@ -1,0 +1,15 @@
+{
+  "semgrep": {
+    "rulesFile": "./rules/owasp-top10.yml",
+    "exclude": [
+      "node_modules",
+      "dist",
+      "build",
+      ".git"
+    ],
+    "timeoutSeconds": 0
+  },
+  "bandit": {
+    "enabled": true
+  }
+}

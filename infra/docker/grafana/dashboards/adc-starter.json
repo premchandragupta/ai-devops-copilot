@@ -1,0 +1,72 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Audit events rate by type",
+      "targets": [
+        {
+          "expr": "sum by (type) (rate(audit_events_total[5m]))",
+          "legendFormat": "{{type}}"
+        }
+      ],
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Audit events total (last 5m)",
+      "targets": [
+        {
+          "expr": "sum(increase(audit_events_total[5m]))"
+        }
+      ],
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 9
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Targets up",
+      "targets": [
+        {
+          "expr": "sum(up)"
+        }
+      ],
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 9
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP requests rate (audit-log)",
+      "targets": [
+        {
+          "expr": "sum by (route,method,status) (rate(http_requests_total[5m]))",
+          "legendFormat": "{{method}} {{route}} {{status}}"
+        }
+      ],
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      }
+    }
+  ],
+  "schemaVersion": 38,
+  "title": "ADC Starter",
+  "version": 1
+}

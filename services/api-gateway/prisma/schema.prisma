@@ -1,0 +1,27 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // IMPORTANT: env() takes a VARIABLE NAME, not a URL.
+  // Keep this exactly as POSTGRES_URL and put the URL in a .env file.
+  url      = env("POSTGRES_URL")
+}
+
+model Project {
+  id        String    @id @default(cuid())
+  name      String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  pipelines Pipeline[]
+}
+
+model Pipeline {
+  id        String   @id @default(cuid())
+  name      String
+  repoUrl   String?
+  project   Project  @relation(fields: [projectId], references: [id])
+  projectId String
+  createdAt DateTime @default(now())
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@ai-devops-copilot/runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "analyze": "node dist/cli.js",
+    "canary": "node dist/integrations/canary.js",
+    "health": "node dist/integrations/health.js"
+  },
+  "devDependencies": {
+    "@octokit/auth-app": "^7.2.2",
+    "@octokit/rest": "^21.1.1",
+    "@slack/web-api": "^7.10.0",
+    "@types/minimist": "^1.2.5",
+    "@types/node": "^22.5.0",
+    "dotenv": "^16.6.1",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "minimist": "^1.2.8"
+  }
+}

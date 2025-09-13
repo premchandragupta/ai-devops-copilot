@@ -1,0 +1,48 @@
+version: "3.9"
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: adc-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+    ports:
+      - "9090:9090"
+    networks: [adcnet]
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: adc-grafana
+    restart: unless-stopped
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    networks: [adcnet]
+  audit-log:
+    build:
+      context: ../../services/audit-log
+      dockerfile: Dockerfile
+    container_name: adc-audit-log
+    restart: unless-stopped
+    environment:
+      - PORT=4003
+      - AUDIT_LOG_FILE=/data/audit.log
+    volumes:
+      - audit-data:/data
+    ports:
+      - "4003:4003"
+    networks: [adcnet]
+networks:
+  adcnet:
+volumes:
+  grafana-data:
+  audit-data:

@@ -1,0 +1,8 @@
+*** Begin Patch
+*** Update File: package.json
+@@
+   "scripts": {
+-    "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
++    "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
++    "scan:example": "curl -X POST http://localhost:3001/scan -H "Content-Type: application/json" -d "{\\\"path\\\":\\\"C:\\\\\\Projects\\\\\\ai-devops-copilot\\\\\\web\\\"}"",
+*** End Patch
