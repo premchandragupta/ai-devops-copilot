@@ -1,0 +1,5 @@
+{
+  "/pipelines/page": "app/pipelines/page.js",
+  "/policies/page": "app/policies/page.js",
+  "/dashboard/page": "app/dashboard/page.js"
+}
