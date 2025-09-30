@@ -1,0 +1,6 @@
+﻿rules:
+- id: js-eval-detected
+  message: "Avoid using eval() - code injection risk."
+  languages: [javascript, typescript]
+  severity: MEDIUM
+  pattern: eval(...)

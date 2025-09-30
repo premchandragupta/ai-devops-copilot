@@ -1,0 +1,14 @@
+﻿rules:
+- id: express-cors-any-origin
+  message: "CORS allows any origin; restrict origins."
+  languages: [javascript, typescript]
+  severity: MEDIUM
+  pattern-either:
+    - pattern: app.use(cors())
+    - patterns:
+        - pattern: app.use(cors({ ... }))
+        - pattern-inside: |
+            import cors from "cors"
+            ...
+    - patterns:
+        - pattern: app.use(cors({ origin: "*", ... }))

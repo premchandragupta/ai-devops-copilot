@@ -1,0 +1,6 @@
+﻿rules:
+- id: react-dangerously-set-inner-html
+  message: "dangerouslySetInnerHTML used; XSS risk."
+  languages: [javascript, typescript, jsx, tsx]
+  severity: MEDIUM
+  pattern: <... dangerouslySetInnerHTML={{...}} ... />

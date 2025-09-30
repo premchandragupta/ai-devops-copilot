@@ -1,0 +1,15 @@
+﻿rules:
+- id: js-dangerous-child-process
+  message: "Use of child_process exec/execSync/spawn(shell=true) is dangerous (command injection)."
+  languages: [javascript, typescript]
+  severity: HIGH
+  pattern-either:
+    - patterns:
+        - pattern: exec(...)
+        - pattern-inside: |
+            import { exec } from "child_process"
+            ...
+    - pattern: require("child_process").exec(...)
+    - pattern: require('child_process').exec(...)
+    - pattern: execSync(...)
+    - pattern: spawn(..., ..., { ..., shell: true, ... })

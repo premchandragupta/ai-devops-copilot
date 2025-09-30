@@ -1,120 +1,173 @@
-// A robust, Windows-friendly analyzer the CLI can auto-pick.
-// - Extracts changed files from git
-// - Calls policy-engine if available
-// - Writes a JSON report
-// - Returns exitCode=1 when HIGH is present
-
+// Robust analyzer for Windows: calls policy-engine, then falls back to a local regex scan
+// if policy-engine returns 0 findings (so you always get a signal).
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-type AnalyzeOpts = {
-  repoPath: string
-  baseSha: string
-  headSha: string
-  outDir?: string
-}
+type AnalyzeOpts = { repoPath: string; baseSha: string; headSha: string; outDir?: string; fullScan?: boolean }
+type Finding = { tool: string; severity: string; file: string; line?: number; ruleId?: string; title?: string; message?: string }
 
-type Finding = { tool?: string; severity?: string; file?: string; line?: number|string; ruleId?: string; title?: string; message?: string; remediation?: string }
-
-function execp(cmd: string, args: string[], cwd?: string): Promise<{ code:number; stdout:string; stderr:string }> {
-  return new Promise((resolve) => {
+function sh(cmd: string, args: string[], cwd?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise(resolve => {
     const p = spawn(cmd, args, { cwd, shell: process.platform === 'win32' })
     let stdout = '', stderr = ''
-    p.stdout.on('data', d => stdout += d.toString())
-    p.stderr.on('data', d => stderr += d.toString())
+    p.stdout.on('data', d => (stdout += d.toString()))
+    p.stderr.on('data', d => (stderr += d.toString()))
     p.on('close', code => resolve({ code: code ?? 0, stdout, stderr }))
   })
 }
+function normSlash(p: string) { return p.replace(/\\/g, '/').toLowerCase() }
 
-async function gitChangedFiles(repoPath: string, base: string, head: string): Promise<{files:string[], binary:Set<string>}> {
-  // List changed files
-  const names = await execp('git', ['-C', repoPath, 'diff', '--name-only', `${base}..${head}`])
-  if (names.code !== 0) throw new Error(`git diff --name-only failed: ${names.stderr || names.stdout}`)
-
-  const files = names.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
-
-  // Detect binary via numstat '-' markers
-  const num = await execp('git', ['-C', repoPath, 'diff', '--numstat', `${base}..${head}`])
-  const binary = new Set<string>()
-  for (const line of num.stdout.split(/\r?\n/)) {
-    // format: "<add>\t<del>\t<path>"
-    if (!line.trim()) continue
-    const parts = line.split('\t')
-    if (parts.length < 3) continue
-    const [add, del, file] = parts
-    if (add === '-' || del === '-') binary.add(file)
-  }
-
-  return { files, binary }
+async function getChangedFiles(repoPath: string, base: string, head: string): Promise<string[]> {
+  if (!base || !head) return []
+  const r = await sh('git', ['-C', repoPath, 'diff', '--name-only', `${base}..${head}`])
+  if (r.code !== 0) return []
+  return r.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(normSlash)
 }
 
-function findRepoRootFromHere(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url))          // .../services/runner/dist
-  return path.resolve(here, '..', '..')                              // .../services/runner
-}
-
-function resolvePolicyEngineCli(): string | null {
-  if (process.env.POLICY_ENGINE_BIN && fs.existsSync(process.env.POLICY_ENGINE_BIN)) {
-    return process.env.POLICY_ENGINE_BIN
-  }
-  const runnerRoot = findRepoRootFromHere()                          // .../services/runner
-  const cli = path.resolve(runnerRoot, '..', 'policy-engine', 'dist', 'cli.js')
-  return fs.existsSync(cli) ? cli : null
+function resolvePolicyCliAbs(): string {
+  const __filename = fileURLToPath(import.meta.url)
+  const __dirname = path.dirname(__filename)
+  const try1 = path.resolve(__dirname, '../../policy-engine/dist/cli.js')
+  const try2 = path.resolve(__dirname, '../../../services/policy-engine/dist/cli.js')
+  const try3 = path.resolve(process.cwd(), '../policy-engine/dist/cli.js')
+  for (const p of [try1, try2, try3]) if (fs.existsSync(p)) return p
+  // Don’t throw — we’ll fall back to local scan if missing
+  return ''
 }
 
 async function runPolicyEngine(repoPath: string): Promise<{ findings: Finding[] }> {
-  const cli = resolvePolicyEngineCli()
-  if (!cli) return { findings: [] }  // gracefully skip if not built
-
-  const res = await execp('node', [cli, '--path', repoPath])
-  if (res.code !== 0) throw new Error(`policy-engine failed: ${res.stderr || res.stdout}`)
-  try {
-    const parsed = JSON.parse(res.stdout)
-    if (Array.isArray(parsed?.findings)) return { findings: parsed.findings as Finding[] }
-  } catch {}
-  return { findings: [] }
+  const cli = resolvePolicyCliAbs()
+  if (!cli) return { findings: [] }
+  const nodeBin = process.execPath
+  const args = [cli, '--path', repoPath]
+  const env = { ...process.env } // preserves POLICY_SEMGREP_BIN if you set it
+  return new Promise(resolve => {
+    const p = spawn(nodeBin, args, { shell: process.platform === 'win32', env })
+    let out = ''
+    p.stdout.on('data', d => (out += d.toString()))
+    p.on('close', () => {
+      try {
+        const json = JSON.parse(out || '{}')
+        resolve({ findings: Array.isArray(json.findings) ? json.findings : [] })
+      } catch { resolve({ findings: [] }) }
+    })
+  })
 }
 
-export async function analyze(opts: AnalyzeOpts): Promise<{ result: { findings: Finding[], changedFiles: string[], reportPath: string }, exitCode:number }> {
-  const repoPath = String(opts.repoPath || '').trim()
-  const baseSha  = String(opts.baseSha  || '').trim()
-  const headSha  = String(opts.headSha  || '').trim()
-  const outDir   = path.resolve(String(opts.outDir || path.resolve(process.cwd(), 'reports')))
-
-  if (!repoPath || !baseSha || !headSha) {
-    throw new Error(`Missing params. repoPath="${repoPath}" baseSha="${baseSha}" headSha="${headSha}"`)
+// ---- local fallback scanner (regex) ----
+function walkFiles(root: string, exts = ['.js', '.jsx', '.ts', '.tsx']) {
+  const out: string[] = []
+  const skip = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next'])
+  const stack = [root]
+  while (stack.length) {
+    const d = stack.pop()!
+    let items: string[] = []
+    try { items = fs.readdirSync(d) } catch { continue }
+    for (const name of items) {
+      const fp = path.join(d, name)
+      let st: fs.Stats
+      try { st = fs.statSync(fp) } catch { continue }
+      if (st.isDirectory()) { if (!skip.has(name)) stack.push(fp) }
+      else if (exts.includes(path.extname(name))) out.push(fp)
+    }
   }
-  fs.mkdirSync(outDir, { recursive: true })
+  return out
+}
+function relToRepo(repo: string, p: string) {
+  let abs = p
+  if (!path.isAbsolute(abs)) abs = path.resolve(repo, abs)
+  return path.relative(repo, abs).split(path.sep).join('/')
+}
+function localRegexScan(repoPath: string): Finding[] {
+  const files = walkFiles(repoPath)
+  const findings: Finding[] = []
+  const rules: { id: string; title: string; sev: 'HIGH'|'MEDIUM'; test: (l: string)=>boolean }[] = [
+    { id: 'js-eval-detected', title: 'Avoid using eval()', sev: 'MEDIUM', test: l => /\beval\s*\(/i.test(l) },
+    { id: 'js-dangerous-child-process', title: 'Dangerous child_process execution', sev: 'HIGH',
+      test: l => /(child_process|execSync|spawn\s*\(|\bexec\s*\()/i.test(l) && !/\/\/\s*safe-ignore/i.test(l) },
+    { id: 'express-cors-any-origin', title: 'CORS allows any origin', sev: 'MEDIUM',
+      test: l => /app\.use\s*\(\s*cors\s*\(/i.test(l) || /origin\s*:\s*["']\*/i.test(l) },
+    { id: 'react-dangerously-set-inner-html', title: 'dangerouslySetInnerHTML used (XSS risk)', sev: 'MEDIUM',
+      test: l => /dangerouslySetInnerHTML\s*=/i.test(l) },
+    { id: 'secret-openai-key', title: 'Likely OpenAI API key hardcoded', sev: 'HIGH',
+      test: l => /sk-[A-Za-z0-9_\-]{10,}/.test(l) },
+    { id: 'secret-slack-bot', title: 'Likely Slack bot token hardcoded', sev: 'HIGH',
+      test: l => /xoxb-[A-Za-z0-9_\-]{10,}/.test(l) },
+    { id: 'mongoose-plaintext-password', title: 'Password stored as plaintext String', sev: 'HIGH',
+      test: l => /password\s*:\s*String/i.test(l) || /password\s*:\s*\{\s*type\s*:\s*String/i.test(l) },
+  ]
+  for (const fp of files) {
+    let content = ''
+    try { content = fs.readFileSync(fp, 'utf8') } catch { continue }
+    const lines = content.split(/\r?\n/)
+    lines.forEach((line, idx) => {
+      for (const r of rules) {
+        if (r.test(line)) {
+          findings.push({
+            tool: 'regex',
+            severity: r.sev,
+            file: relToRepo(repoPath, fp),
+            line: idx + 1,
+            ruleId: r.id,
+            title: r.title,
+            message: line.trim().slice(0, 200)
+          })
+        }
+      }
+    })
+  }
+  return findings
+}
+// ---------------------------------------
 
-  const { files, binary } = await gitChangedFiles(repoPath, baseSha, headSha)
+function ensureDir(p: string) { fs.mkdirSync(p, { recursive: true }) }
+function writeReport(outDir: string, data: any): string {
+  ensureDir(outDir)
+  const file = path.resolve(outDir, `report-${Date.now()}.json`)
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8')
+  return file
+}
 
-  // Policy engine (skip binaries)
-  const { findings } = await runPolicyEngine(repoPath)
+function filterByFiles(findings: Finding[], files: string[]): Finding[] {
+  const set = new Set(files.map(normSlash))
+  return findings.filter(f => set.has(normSlash(f.file)))
+}
 
-  // Mark/skip binaries just in case
-  const filtered = findings.filter(f => f.file ? !binary.has(f.file) : true)
+export async function analyzeRepoDiff(opts: AnalyzeOpts): Promise<{ result: any; exitCode: number }> {
+  const repo = path.resolve(opts.repoPath)
+  const outDir = path.resolve(opts.outDir || path.join(process.cwd(), 'reports'))
+  const changed = await getChangedFiles(repo, opts.baseSha, opts.headSha)
+  let fullScan = Boolean(opts.fullScan) || process.env.RUNNER_FULL_SCAN === '1' || changed.length === 0
 
-  const report = {
-    changedFiles: files,
-    findings: filtered,
-    summary: {
-      total: filtered.length,
-      bySeverity: filtered.reduce((acc: Record<string, number>, f) => {
-        const s = (f.severity || 'UNKNOWN').toUpperCase()
-        acc[s] = (acc[s] || 0) + 1
-        return acc
-      }, {})
-    },
-    baseSha, headSha, generatedAt: new Date().toISOString()
+  // 1) Try policy-engine
+  let pe = await runPolicyEngine(repo)
+  let findings: Finding[] = Array.isArray(pe.findings) ? pe.findings : []
+
+  // 2) If diff-only and findings exist, filter to changed files
+  if (!fullScan && findings.length > 0) {
+    findings = filterByFiles(findings, changed)
   }
 
-  const reportPath = path.join(outDir, `report-${Date.now()}.json`)
-  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf8')
+  // 3) Fallback: if still empty, run local regex scan (full repo)
+  if (findings.length === 0) {
+    fullScan = true
+    findings = localRegexScan(repo)
+  }
 
-  const highCount = report.summary.bySeverity['HIGH'] || 0
-  const exitCode = highCount > 0 ? 1 : 0
-
-  return { result: { findings: filtered, changedFiles: files, reportPath }, exitCode }
+  const total = findings.length
+  const high = findings.filter(f => (f.severity || '').toUpperCase() === 'HIGH').length
+  const result = {
+    mode: fullScan ? 'full' : 'diff',
+    repoPath: repo,
+    baseSha: opts.baseSha,
+    headSha: opts.headSha,
+    stats: { total, high },
+    findings
+  }
+  const reportPath = writeReport(outDir, result)
+  const exitCode = high > 0 ? 1 : 0
+  return { result: { ...result, reportPath }, exitCode }
 }

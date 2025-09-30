@@ -19,6 +19,7 @@
     "typescript": "^5.5.4"
   },
   "dependencies": {
+    "@octokit/app": "^16.1.0",
     "minimist": "^1.2.8"
   }
 }

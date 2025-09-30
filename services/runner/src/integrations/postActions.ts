@@ -1,123 +1,148 @@
-import { optionalEnv } from './env.js'
-import { createOrUpdateCheck } from './githubClient.js'
-import { jiraHealth, createIssue } from './jiraClient.js'
-import { slackHealth, postMessage } from './slackClient.js'
+// ESM, Node 22+
+// Posts results to Slack, Jira (ADF description via jiraClient), and GitHub Checks.
+// Safe to call even if some integrations are not configured.
+//
+// Env used:
+//  - Slack: SLACK_BOT_TOKEN, SLACK_CHANNEL_ID
+//  - Jira:  JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_PROJECT_KEY, (optional) JIRA_ISSUE_TYPE, JIRA_LABELS
+//  - GitHub Checks: APP_ID, PRIVATE_KEY/PRIVATE_KEY_PATH, GITHUB_OWNER, GITHUB_REPO
+//  - Flags: NO_GITHUB_CHECKS=1 to skip, NO_SLACK=1 to skip, NO_JIRA=1 to skip
 
-type Finding = {
-  severity: string
-  file?: string
-  line?: number | string
-  ruleId?: string
-  title?: string
-  message?: string
-}
+import process from "node:process"
+import { createOrUpdateCheck } from "./githubClient.js"
+import { postMessage } from "./slackClient.js"
+import { createIssue } from "./jiraClient.js"
 
-type AnalyzeResult = {
-  findings?: Finding[]
-  comments?: { file: string; line?: number; body: string }[]
-  [key: string]: any
-}
-
-function summarize(result: AnalyzeResult) {
-  const counts: Record<string, number> = {}
-  for (const f of result.findings ?? []) {
-    const s = (f.severity || 'UNKNOWN').toUpperCase()
-    counts[s] = (counts[s] ?? 0) + 1
+type PostArgs = {
+  headSha: string
+  result: {
+    mode?: "full" | "diff"
+    repoPath?: string
+    baseSha?: string
+    headSha?: string
+    reportPath?: string
+    stats?: { total: number; high: number }
+    findings?: Array<{
+      tool?: string
+      severity?: string
+      file?: string
+      line?: number
+      ruleId?: string
+      title?: string
+      message?: string
+    }>
   }
-  const total = (result.findings ?? []).length
-  const high = counts['HIGH'] ?? 0
-  const med = counts['MEDIUM'] ?? 0
-  const low = counts['LOW'] ?? 0
-  return { total, high, med, low, counts }
-}
-
-function topFindingsMarkdown(result: AnalyzeResult, n = 10): string {
-  const list = (result.findings ?? []).slice(0, n).map((f, i) => {
-    const loc = f.file ? `${f.file}${f.line ? ':'+f.line : ''}` : '(no file)'
-    const id = f.ruleId ? ` [${f.ruleId}]` : ''
-    const title = f.title || f.message || 'Finding'
-    return `${i+1}. **${(f.severity||'').toUpperCase()}**${id} — ${title} — \`${loc}\``
-  })
-  return list.join('\n')
-}
-
-export async function postIntegrations(opts: {
-  headSha?: string,
-  result: AnalyzeResult,
   exitCode: number
-}) {
-  const { result, exitCode } = opts
-  const sum = summarize(result)
-  const top10 = topFindingsMarkdown(result, 10) || '_No findings._'
+}
 
-  // --- Slack ---
-  try {
-    const slackEnabled = !!optionalEnv('SLACK_BOT_TOKEN') && !!optionalEnv('SLACK_CHANNEL_ID')
-    if (slackEnabled) {
-      const ok = await slackHealth()
-      if (ok) {
-        const text =
-`AI DevOps Runner finished:
-- Findings: total=${sum.total}, HIGH=${sum.high}, MED=${sum.med}, LOW=${sum.low}
-- Exit code: ${exitCode}
-- Top findings:
-${top10}`
-        await postMessage(process.env.SLACK_CHANNEL_ID!, text)
-      }
+function hasSlackEnv() {
+  return !!(process.env.SLACK_BOT_TOKEN && process.env.SLACK_CHANNEL_ID)
+}
+function hasJiraEnv() {
+  return !!(
+    process.env.JIRA_BASE_URL &&
+    process.env.JIRA_EMAIL &&
+    process.env.JIRA_API_TOKEN &&
+    process.env.JIRA_PROJECT_KEY
+  )
+}
+function hasGitHubEnv() {
+  return !!(
+    process.env.APP_ID &&
+    (process.env.PRIVATE_KEY || process.env.PRIVATE_KEY_PATH) &&
+    process.env.GITHUB_OWNER &&
+    process.env.GITHUB_REPO
+  )
+}
+
+function fmtFindingLine(f: any, idx: number) {
+  const sev = String(f?.severity || "").toUpperCase()
+  const rule = f?.ruleId || f?.title || "rule"
+  const file = f?.file || "?"
+  const line = typeof f?.line === "number" ? `:${f.line}` : ""
+  const title = f?.title || ""
+  return `${idx + 1}. **${sev}** [${rule}] — ${title} — \`${file}${line}\``
+}
+
+function buildSummaryText(result: PostArgs["result"]) {
+  const total = result?.stats?.total ?? 0
+  const high = result?.stats?.high ?? 0
+  const med = (result?.findings || []).filter((f) => String(f?.severity).toUpperCase() === "MEDIUM").length
+  const low = (result?.findings || []).filter((f) => String(f?.severity).toUpperCase() === "LOW").length
+  return { total, high, med, low }
+}
+
+function topFindingsText(result: PostArgs["result"], cap = 10) {
+  const list = (result?.findings || []).slice(0, cap).map((f, i) => fmtFindingLine(f, i))
+  return list.join("\n")
+}
+
+export async function postIntegrations({ headSha, result, exitCode }: PostArgs) {
+  const { total, high, med, low } = buildSummaryText(result)
+  const top = topFindingsText(result, 10)
+  const conclusion = high > 0 ? "failure" : "success"
+  const summary = `Static + LLM analysis (${result.mode || "diff"}) — total=${total}, HIGH=${high}, MED=${med}, LOW=${low}`
+  const textBlock =
+    `AI DevOps Runner finished:\n` +
+    `- Findings: total=${total}, HIGH=${high}, MED=${med}, LOW=${low}\n` +
+    `- Exit code: ${exitCode}\n` +
+    (result?.reportPath ? `- Report: ${result.reportPath}\n` : "") +
+    (top ? `- Top findings:\n${top}` : "- Top findings: (none)")
+
+  // ---------- Slack ----------
+  if (!process.env.NO_SLACK && hasSlackEnv()) {
+    try {
+      const channel = process.env.SLACK_CHANNEL_ID!
+      const trimmed = textBlock.length > 3500 ? textBlock.slice(0, 3490) + "\n…(truncated)" : textBlock
+      // NOTE: slackClient.postMessage(channel, text)
+      await postMessage(channel, trimmed)
+    } catch (e: any) {
+      console.error("[post] slack error:", e?.message || String(e))
     }
-  } catch (e) {
-    console.error('[post] slack error:', (e as any)?.message || String(e))
   }
 
-  // --- Jira (create issues for HIGH) ---
-  try {
-    const jiraOk = await jiraHealth()
-    if (jiraOk && (sum.high > 0)) {
-      const highs = (result.findings ?? []).filter(f => (f.severity||'').toUpperCase() === 'HIGH').slice(0, 10)
+  // ---------- Jira ----------
+  if (!process.env.NO_JIRA && hasJiraEnv()) {
+    try {
+      const highs = (result.findings || [])
+        .filter((f) => String(f?.severity).toUpperCase() === "HIGH")
+        .slice(0, 3) // at most 3 issues per run
       for (const f of highs) {
-        const loc = f.file ? `${f.file}${f.line ? ':'+f.line : ''}` : '(no file)'
-        const title = `[AI Runner] HIGH${f.ruleId? ' '+f.ruleId:''} at ${loc}`
-        const description =
-`Detected HIGH severity issue.
-
-Rule: ${f.ruleId || 'n/a'}
-Title: ${f.title || 'n/a'}
-Location: ${loc}
-
-Message:
-${f.message || 'n/a'}
-
-Please review the pipeline report for details.`
-        try {
-          await createIssue(title, description)
-        } catch (ie) {
-          console.error('[post] jira createIssue error:', (ie as any)?.message || String(ie))
-        }
+        const summaryLine = `[AI DevOps] ${f.ruleId || f.title || "High finding"} in ${f.file || "?"}${typeof f.line === "number" ? ":" + f.line : ""}`
+        const desc =
+          `Auto-created by AI DevOps Runner\n` +
+          `Severity: ${String(f.severity || "").toUpperCase()}\n` +
+          `Rule: ${f.ruleId || f.title || "unknown"}\n` +
+          `File: ${f.file || "?"}${typeof f.line === "number" ? ":" + f.line : ""}\n` +
+          (result?.reportPath ? `Report: ${result.reportPath}\n` : "") +
+          `Mode: ${result?.mode || "diff"}\n` +
+          `Total findings: ${total} (HIGH=${high})`
+        await createIssue({ summary: summaryLine, descriptionText: desc })
       }
+    } catch (e: any) {
+      console.error("[post] jira createIssue error:", e?.message || String(e))
     }
-  } catch (e) {
-    console.error('[post] jira error:', (e as any)?.message || String(e))
   }
 
-  // --- GitHub Check ---
-  try {
-    const owner = optionalEnv('GITHUB_OWNER')
-    const repo = optionalEnv('GITHUB_REPO')
-    const headSha = opts.headSha || optionalEnv('GITHUB_SHA')
-    if (owner && repo && headSha) {
-      const conclusion = (sum.high ?? 0) > 0 ? 'failure' : 'success'
-      const summary = `Static + LLM analysis. Findings: total=${sum.total}, HIGH=${sum.high}, MED=${sum.med}, LOW=${sum.low}`
-      const text = top10
+  // ---------- GitHub Check ----------
+  if (!process.env.NO_GITHUB_CHECKS && hasGitHubEnv()) {
+    try {
+      const owner = process.env.GITHUB_OWNER!
+      const repo = process.env.GITHUB_REPO!
+      const text =
+        (textBlock.length > 65000 ? textBlock.slice(0, 64980) + "\n…(truncated)" : textBlock) ||
+        "AI DevOps Runner finished."
       await createOrUpdateCheck({
-        owner, repo, headSha,
-        name: 'AI DevOps Runner',
-        status: 'completed',
-        conclusion,
+        owner,
+        repo,
+        headSha,
+        name: "AI DevOps Runner",
+        conclusion: conclusion as "success" | "failure",
         summary,
         text
-      } as any)
+      })
+    } catch (e: any) {
+      console.error("[post] github check error:", e?.message || String(e))
     }
-  } catch (e) {
-    console.error('[post] github check error:', (e as any)?.message || String(e))
   }
 }
